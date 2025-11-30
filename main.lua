@@ -1,179 +1,183 @@
-local SWDisplayWidget = require("swdisplaywidget")
-local DataStorage = require("datastorage")
-local Font = require("ui/font")
-local FontList = require("fontlist")
-local LuaSettings = require("frontend/luasettings")
-local UIManager = require("ui/uimanager")
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local cre -- delayed loading
-local _ = require("gettext")
-local T = require("ffi/util").template
+-- main.lua
+-- Stopwatch – Updates every second, flashes only on whole minutes
 
-local StopWatch = WidgetContainer:extend {
+local Device = require("device")
+local Screen = Device.screen
+local Geom = require("ui/geometry")
+local GestureRange = require("ui/gesturerange")
+local InputContainer = require("ui/widget/container/inputcontainer")
+local TextBoxWidget = require("ui/widget/textboxwidget")
+local ButtonTable = require("ui/widget/buttontable")
+local UIManager = require("ui/uimanager")
+local VerticalGroup = require("ui/widget/verticalgroup")
+local VerticalSpan = require("ui/widget/verticalspan")
+local CenterContainer = require("ui/widget/container/centercontainer")
+local FrameContainer = require("ui/widget/container/framecontainer")
+local Font = require("ui/font")
+local Blitbuffer = require("ffi/blitbuffer")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local LuaSettings = require("frontend/luasettings")
+local DataStorage = require("datastorage")
+local Datetime = require("frontend/datetime")
+local T = require("ffi/util").template
+local _ = require("gettext")
+
+local SWDisplayWidget = InputContainer:extend{ props = {} }
+
+function SWDisplayWidget:init()
+    self.now = os.time()
+    self.paused = false
+    self.pause_offset = 0
+    self.last_minute = -1  -- track when we last flashed
+
+    self.ges_events.TapClose = {
+        GestureRange:new{
+            ges = "tap",
+            range = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
+        }
+    }
+
+    -- TRUE FULLSCREEN (hides absolutely everything)
+    self.covers_fullscreen = true
+    self.modal = true
+
+    self[1] = self:render()
+    UIManager:setDirty(nil, "full")
+end
+
+function SWDisplayWidget:onShow()
+    UIManager:setDirty(nil, "full")
+    self:autoRefresh()
+end
+
+function SWDisplayWidget:onTapClose()
+    --mle UIManager:unscheduleAll()
+    UIManager:unschedule(self.autoRefresh)
+    UIManager:close(self)
+end
+SWDisplayWidget.onAnyKeyPressed = SWDisplayWidget.onTapClose
+
+function SWDisplayWidget:getTimeText()
+    local elapsed = self.paused and self.pause_offset or (self.pause_offset + (os.time() - self.now))
+    local _, min, sec = Datetime.secondsToClock(elapsed, false, false):match("(%d+):(%d+):(%d+)")
+    return T("%1:%2", min, string.format("%02d", sec))
+end
+
+function SWDisplayWidget:update()
+    local txt = self:getTimeText()
+    if self.time_widget.text ~= txt then
+        self.time_widget:setText(txt)
+
+        -- Extract current minute
+        local elapsed = self.paused and self.pause_offset or (self.pause_offset + (os.time() - self.now))
+        local current_minute = math.floor(elapsed / 60)
+
+        -- Flash ONLY when minute changes
+        if current_minute ~= self.last_minute then
+            self.last_minute = current_minute
+            UIManager:setDirty(self, "flashpartial")   -- full e-ink flash
+        else
+            UIManager:setDirty(self, "ui")        -- ghosting-free update (no flash)
+        end
+    end
+end
+
+-- Refresh every second, but smart flash control is in update()
+function SWDisplayWidget:autoRefresh()
+    self:update()
+    UIManager:scheduleIn(1, function() self:autoRefresh() end)
+end
+
+function SWDisplayWidget:onTogglePause()
+    self.paused = not self.paused
+    if self.paused then
+        self.pause_offset = self.pause_offset + (os.time() - self.now)
+        self.pause_button.text = _("Resume")
+    else
+        self.now = os.time()
+        self.pause_button.text = _("Pause")
+    end
+    UIManager:setDirty(self, "ui")
+end
+
+function SWDisplayWidget:onRestart()
+    self.now = os.time()
+    self.pause_offset = 0
+    self.paused = false
+    self.last_minute = -1
+    self.pause_button.text = _("Pause")
+    self.time_widget:setText("00:00")
+    UIManager:setDirty(self, "flashpartial")
+end
+
+function SWDisplayWidget:render()
+    local s = Screen:getSize()
+
+    -- Huge timer (will be perfectly centered by CenterContainer)
+    self.time_widget = TextBoxWidget:new{
+        text = "00:00",
+        face = Font:getFace(self.props.time_widget.font_name or "cfont", self.props.time_widget.font_size or 220),
+        width = s.w,
+        height = math.floor(s.h * 0.6),
+        alignment = "center",
+        bold = true,
+    }
+
+    -- Buttons
+    self.pause_button = { text = _("Pause") }
+    local buttons = ButtonTable:new{
+        width = math.floor(s.w * 0.9),
+        buttons = {{
+            { text_func = function() return self.pause_button.text end,
+              callback = function() self:onTogglePause() end },
+            { text = _("Restart"), callback = function() self:onRestart() end },
+        }},
+    }
+
+    local content = VerticalGroup:new{
+        align = "center",
+        VerticalSpan:new{ height = math.floor(s.h * 0.15) },
+        self.time_widget,
+        VerticalSpan:new{ height = math.floor(s.h * 0.12) },
+        buttons,
+    }
+
+    return FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        dimen = s,
+        CenterContainer:new{ dimen = s, content },
+    }
+end
+
+-- Plugin entry
+local StopWatch = WidgetContainer:extend{
     name = "stopwatch",
     config_file = "stopwatch_config.lua",
-    local_storage = nil,
-    is_doc_only = false,
-    start_time = nil,
 }
 
 function StopWatch:init()
-    self:initLuaSettings()
-    self.settings = self.local_storage.data
-    self.ui.menu:registerToMainMenu(self)
-end
-
-function StopWatch:initLuaSettings()
-    self.local_storage = LuaSettings:open(("%s/%s"):format(DataStorage:getSettingsDir(), self.config_file))
-    if next(self.local_storage.data) == nil then
-        self.local_storage:reset({
+    local path = DataStorage:getSettingsDir() .. "/" .. self.config_file
+    self.settings = LuaSettings:open(path)
+    if not self.settings.data.time_widget then
+        self.settings:reset({
             time_widget = {
-                font_name = "./fonts/noto/NotoSans-Regular.ttf",
-                font_size = 119,
+                font_name = "./fonts/noto/NotoSans-Bold.ttf",
+                font_size = 220,
             },
         })
-        self.local_storage:flush()
+        self.settings:flush()
     end
+    self.ui.menu:registerToMainMenu(self)
 end
 
 function StopWatch:addToMainMenu(menu_items)
     menu_items.StopWatch = {
-        text = _("Stopwatch"),
+        text = _("StopWatch"),
         sorting_hint = "more_tools",
-        sub_item_table = {
-            {
-                text = _("Launch"),
-                separator = true,
-                callback = function()
-                    UIManager:show(SWDisplayWidget:new { props = self.settings })
-                end,
-            },
-            {
-                text = _("Time widget font"),
-                sub_item_table = self:getFontMenuList(
-                    {
-                        font_callback = function(font_name)
-                            self:setTimeFont(font_name)
-                        end,
-                        font_size_callback = function(font_size)
-                            self:setTimeFontSize(font_size)
-                        end,
-                        font_size_func = function()
-                            return self.settings.time_widget.font_size
-                        end,
-                        checked_func = function(font)
-                            return font == self.settings.time_widget.font_name
-                        end
-                    }
-                ),
-            },
-        },
+        callback = function()
+            UIManager:show(SWDisplayWidget:new{ props = self.settings.data })
+        end,
     }
-end
-
-function StopWatch:getFontMenuList(args)
-    -- Unpack arguments
-    local font_callback = args.font_callback
-    local font_size_callback = args.font_size_callback
-    local font_size_func = args.font_size_func
-    local checked_func = args.checked_func
-
-    -- Based on readerfont.lua
-    cre = require("document/credocument"):engineInit()
-    local face_list = cre.getFontFaces()
-    local menu_list = {}
-
-    -- Font size
-    table.insert(menu_list, {
-        text_func = function()
-            return T(_("Font size: %1"), font_size_func())
-        end,
-        callback = function(touchmenu_instance)
-            self:showFontSizeSpinWidget(touchmenu_instance, font_size_func(), font_size_callback)
-        end,
-        keep_menu_open = true,
-        separator = true
-    })
-
-    -- Font list
-    for k, v in ipairs(face_list) do
-        local font_filename, font_faceindex, is_monospace = cre.getFontFaceFilenameAndFaceIndex(v)
-        table.insert(menu_list, {
-            text_func = function()
-                -- defaults are hardcoded in credocument.lua
-                local default_font = G_reader_settings:readSetting("cre_font")
-                local fallback_font = G_reader_settings:readSetting("fallback_font")
-                local monospace_font = G_reader_settings:readSetting("monospace_font")
-                local text = v
-                if font_filename and font_faceindex then
-                    text = FontList:getLocalizedFontName(font_filename, font_faceindex) or text
-                end
-
-                if v == monospace_font then
-                    text = text .. " \u{1F13C}" -- Squared Latin Capital Letter M
-                elseif is_monospace then
-                    text = text .. " \u{1D39}"  -- Modified Letter Capital M
-                end
-                if v == default_font then
-                    text = text .. "   ★"
-                end
-                if v == fallback_font then
-                    text = text .. "   �"
-                end
-                return text
-            end,
-            font_func = function(size)
-                if G_reader_settings:nilOrTrue("font_menu_use_font_face") then
-                    if font_filename and font_faceindex then
-                        return Font:getFace(font_filename, size, font_faceindex)
-                    end
-                end
-            end,
-            callback = function()
-                return font_callback(font_filename)
-            end,
-            hold_callback = function(touchmenu_instance)
-            end,
-            checked_func = function()
-                return checked_func(font_filename)
-            end,
-            menu_item_id = v,
-        })
-    end
-
-    return menu_list
-end
-
-function StopWatch:setTimeFont(font)
-    self.settings["time_widget"]["font_name"] = font
-    self.local_storage:reset(self.settings)
-    self.local_storage:flush()
-end
-
-function StopWatch:setTimeFontSize(font_size)
-    self.settings["time_widget"]["font_size"] = font_size
-    self.local_storage:reset(self.settings)
-    self.local_storage:flush()
-end
-
-function StopWatch:showFontSizeSpinWidget(touchmenu_instance, font_size, callback)
-    -- Lazy loading the widget import
-    local SpinWidget = require("ui/widget/spinwidget")
-    UIManager:show(
-        SpinWidget:new {
-            value = font_size,
-            value_min = 8,
-            value_max = 256,
-            value_step = 1,
-            value_hold_step = 10,
-            ok_text = _("Set font size"),
-            title_text = _("Set font size"),
-            callback = function(spin)
-                callback(spin.value)
-                touchmenu_instance:updateItems()
-            end
-        }
-    )
 end
 
 return StopWatch
