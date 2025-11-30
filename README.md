@@ -7,7 +7,7 @@ A clean, fullscreen, perfectly centered stopwatch with Pause / Resume and Restar
 
 I sometimes need a big clock or stopwatch, so why not use my ereader?
 
-Works on every KOReader device (Kobo, Kobo, PocketBook, Android, Linux…).
+Works on every KOReader device (Kobo, PocketBook, Android, Linux…).
 
 ## Installation
 
