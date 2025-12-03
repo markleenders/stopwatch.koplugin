@@ -1,4 +1,4 @@
-# Stopwatch for KOReader
+# Stopwatch & Timer for KOReader
 
 A [koreader][1] plugin to display a stopwatch or a timer in a fullscreen widget.
 A clean, fullscreen, perfectly centered stopwatch with Pause / Resume and Restart buttons.
