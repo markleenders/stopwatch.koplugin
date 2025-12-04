@@ -64,15 +64,27 @@ function StopWatchTimerDisplay:onShow()
     UIManager:setDirty(nil, "full")
     self:autoRefresh()
 
-    -- KEEP DEVICE AWAKE – works on Kobo, ignored safely on Linux
+    -- Keep device awake
     if Device.powerd and Device.powerd.setSuspendTimeout then
         self.old_suspend_timeout = Device.powerd.setSuspendTimeout(math.huge)
+    end
+
+    -- Kindle-specific: periodically reset the native T1 timeout to prevent forced suspend
+    if Device:isKindle() and Device.powerd and Device.powerd.resetT1Timeout then
+        -- Reset immediately
+        Device.powerd:resetT1Timeout()
+        -- Then schedule repeated resets every ~4-5 minutes (safe interval)
+        self.kindle_reset_task = function()
+            Device.powerd:resetT1Timeout()
+            UIManager:scheduleIn(5*60, self.kindle_reset_task)  -- 5 minutes
+        end
+        UIManager:scheduleIn(5*60, self.kindle_reset_task)
     end
 
     -- Optional: turn on frontlight only if the device actually has one
     if Device:hasFrontlight() and Device.powerd and Device.powerd.fl and Device.powerd.fl.intensity then
         if Device.powerd.fl:intensity() == 0 then
-            Device.powerd.fl:turnOn()   -- politely turns light on if it was off
+            Device.powerd.fl:turnOn()
         end
     end
 end
@@ -82,6 +94,13 @@ function StopWatchTimerDisplay:onCloseWidget()
     if Device.powerd and Device.powerd.setSuspendTimeout and self.old_suspend_timeout then
         Device.powerd.setSuspendTimeout(self.old_suspend_timeout)
     end
+
+    -- Kindle-specific: unschedule the T1 timeout resets
+    if self.kindle_reset_task then
+        UIManager:unschedule(self.kindle_reset_task)
+        self.kindle_reset_task = nil
+    end
+
     -- Safe unschedule: only unschedule our own function
     UIManager:unschedule(self.autoRefresh)
 end
