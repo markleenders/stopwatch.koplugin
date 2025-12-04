@@ -21,6 +21,7 @@ local DataStorage = require("datastorage")
 local Datetime = require("frontend/datetime")
 local T = require("ffi/util").template
 local _ = require("gettext")
+local PowerD = Device.powerd  -- Global PowerD for Kindle T1 reset
 
 local StopWatchTimerDisplay = InputContainer:extend{ props = {} }
 
@@ -64,26 +65,28 @@ function StopWatchTimerDisplay:onShow()
     UIManager:setDirty(nil, "full")
     self:autoRefresh()
 
-    -- Keep device awake
+    -- KEEP DEVICE AWAKE – general
     if Device.powerd and Device.powerd.setSuspendTimeout then
         self.old_suspend_timeout = Device.powerd.setSuspendTimeout(math.huge)
     end
 
-    -- Kindle-specific: periodically reset the native T1 timeout to prevent forced suspend
-    if Device:isKindle() and Device.powerd and Device.powerd.resetT1Timeout then
-        -- Reset immediately
-        Device.powerd:resetT1Timeout()
-        -- Then schedule repeated resets every ~4-5 minutes (safe interval)
-        self.kindle_reset_task = function()
-            Device.powerd:resetT1Timeout()
-            UIManager:scheduleIn(5*60, self.kindle_reset_task)  -- 5 minutes
+    -- Kindle-specific: periodically reset the firmware T1 timeout
+    if Device:isKindle() then
+        if PowerD and PowerD.resetT1Timeout then
+            PowerD:resetT1Timeout()
         end
-        UIManager:scheduleIn(5*60, self.kindle_reset_task)
+        self.kindle_t1_task = function()
+            if PowerD and PowerD.resetT1Timeout then
+                PowerD:resetT1Timeout()
+            end
+            UIManager:scheduleIn(5*60, self.kindle_t1_task)
+        end
+        UIManager:scheduleIn(5*60, self.kindle_t1_task)
     end
 
-    -- Optional: turn on frontlight only if the device actually has one
-    if Device:hasFrontlight() and Device.powerd and Device.powerd.fl and Device.powerd.fl.intensity then
-        if Device.powerd.fl:intensity() == 0 then
+    -- Politely turn on frontlight if it was off
+    if Device:hasFrontlight() and Device.powerd.fl and Device.powerd.fl.isFrontlightOff then
+        if Device.powerd.fl:isFrontlightOff() then
             Device.powerd.fl:turnOn()
         end
     end
@@ -95,10 +98,10 @@ function StopWatchTimerDisplay:onCloseWidget()
         Device.powerd.setSuspendTimeout(self.old_suspend_timeout)
     end
 
-    -- Kindle-specific: unschedule the T1 timeout resets
-    if self.kindle_reset_task then
-        UIManager:unschedule(self.kindle_reset_task)
-        self.kindle_reset_task = nil
+    -- Kindle-specific: unschedule T1 resets
+    if self.kindle_t1_task then
+        UIManager:unschedule(self.kindle_t1_task)
+        self.kindle_t1_task = nil
     end
 
     -- Safe unschedule: only unschedule our own function
@@ -116,7 +119,7 @@ function StopWatchTimerDisplay:onSuspend()
     UIManager:close(self)
 end
 
-function StopWatchTimerDisplay:onPowerOff()
+function StopWithTimerDisplay:onPowerOff()
     self:onCloseWidget()
     UIManager:close(self)
 end
@@ -152,9 +155,8 @@ function StopWatchTimerDisplay:alarm()
     if self.alarmed then return end
     self.alarmed = true
     UIManager:setDirty(nil, "flashui")
-    if Device:hasFrontlight() and Device.powerd and Device.powerd.fl then
-        for i=1,8 do UIManager:scheduleIn(i*0.25, function() Device.powerd.fl:flash() end) end
-    end
+
+    -- Vibration if the device supports it (many Kobos do)
     if Device.canVibrate then Device:vibrate(500) end
 end
 
@@ -174,7 +176,6 @@ end
 
 function StopWatchTimerDisplay:autoRefresh()
     self:update()
-    -- Update twice per second for smoother display and to avoid missed seconds
     UIManager:scheduleIn(0.5, self.autoRefresh, self)
 end
 
@@ -199,7 +200,6 @@ function StopWatchTimerDisplay:onTogglePause()
         end
     end
 
-    -- Rebuild UI to update button text (Pause/Resume)
     self[1] = self:render()
     UIManager:setDirty(self, "ui")
 end
@@ -214,7 +214,6 @@ function StopWatchTimerDisplay:onRestart()
 
     self.time_widget:setText("00:00")
 
-    -- Rebuild UI so buttons (especially Pause/Resume) show correct text
     self[1] = self:render()
     UIManager:setDirty(self, "flashpartial")
 end
@@ -251,7 +250,7 @@ function StopWatchTimerDisplay:render()
     local content = VerticalGroup:new{
         align = "center",
         VerticalSpan:new{ height = math.floor(s.h * 0.15) },
-        self.time_widget,  -- Use the persistent time widget
+        self.time_widget,
         VerticalSpan:new{ height = math.floor(s.h * 0.1) },
         self.buttons,
     }
@@ -287,7 +286,6 @@ function StopWatchTimerDisplay:setTimerMinutes()
     local next_idx = (current_idx % #options) + 1
     self.timer_minutes = options[next_idx]
 
-    -- Start the timer immediately with the new value
     self.timer_end_time = os.time() + self.timer_minutes * 60
     self.alarmed = false
     self.paused = false
