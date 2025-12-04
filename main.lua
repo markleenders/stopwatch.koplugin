@@ -119,7 +119,7 @@ function StopWatchTimerDisplay:onSuspend()
     UIManager:close(self)
 end
 
-function StopWithTimerDisplay:onPowerOff()
+function StopWatchTimerDisplay:onPowerOff()
     self:onCloseWidget()
     UIManager:close(self)
 end
